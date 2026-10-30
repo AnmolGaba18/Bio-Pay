@@ -1,1 +1,1 @@
-export const DB_NAME = "BioPay"
+export const DB_NAME = "biopay"
