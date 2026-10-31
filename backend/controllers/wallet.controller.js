@@ -24,7 +24,6 @@ const getWalletBalance = async (req, res) => {
                 currency: "INR",
             },
         });
-
     } catch (error) {
         console.error("Wallet balance error:", error.message);
 
@@ -38,6 +37,14 @@ const getWalletBalance = async (req, res) => {
 
 // DEMO WALLET TOP-UP
 const demoTopUp = async (req, res) => {
+    // Demo top-up must never be available in production.
+    if (process.env.NODE_ENV === "production") {
+        return res.status(403).json({
+            success: false,
+            message: "Demo top-up is disabled in production",
+        });
+    }
+
     const { amount } = req.body;
 
     if (
@@ -51,36 +58,49 @@ const demoTopUp = async (req, res) => {
         });
     }
 
-    const session = await mongoose.startSession();
+    let session;
 
     try {
+        session = await mongoose.startSession();
+
         let updatedBalance;
 
         await session.withTransaction(async () => {
-            const user = await User.findById(req.user.id)
-                .session(session);
-
-            if (!user) {
-                throw new Error("USER_NOT_FOUND");
-            }
-
-            const newBalance = user.walletBalance + amount;
-
-            if (!Number.isSafeInteger(newBalance)) {
-                throw new Error("INVALID_BALANCE");
-            }
-
-            const updatedUser = await User.findByIdAndUpdate(
-                req.user.id,
-                { $inc: { walletBalance: amount } },
-                { new: true, session }
+            // Atomic balance update with safe-integer protection.
+            const updatedUser = await User.findOneAndUpdate(
+                {
+                    _id: req.user.id,
+                    walletBalance: {
+                        $lte: Number.MAX_SAFE_INTEGER - amount,
+                    },
+                },
+                {
+                    $inc: { walletBalance: amount },
+                },
+                {
+                    new: true,
+                    session,
+                    runValidators: true,
+                }
             );
+
+            if (!updatedUser) {
+                const userExists = await User.exists({
+                    _id: req.user.id,
+                }).session(session);
+
+                if (!userExists) {
+                    throw new Error("USER_NOT_FOUND");
+                }
+
+                throw new Error("BALANCE_LIMIT_EXCEEDED");
+            }
 
             updatedBalance = updatedUser.walletBalance;
 
             await WalletTransaction.create(
                 [{
-                    userId: user._id,
+                    userId: updatedUser._id,
                     type: "TOP_UP",
                     amount,
                     balanceAfter: updatedBalance,
@@ -108,13 +128,22 @@ const demoTopUp = async (req, res) => {
             });
         }
 
+        if (error.message === "BALANCE_LIMIT_EXCEEDED") {
+            return res.status(409).json({
+                success: false,
+                message: "Wallet balance limit reached",
+            });
+        }
+
         return res.status(500).json({
             success: false,
             message: "Wallet top-up failed",
         });
 
     } finally {
-        await session.endSession();
+        if (session) {
+            await session.endSession();
+        }
     }
 };
 
@@ -122,18 +151,25 @@ const demoTopUp = async (req, res) => {
 // GET TRANSACTION HISTORY
 const getTransactionHistory = async (req, res) => {
     try {
-        const page = Math.max(
-            1,
-            Number.parseInt(req.query.page, 10) || 1
-        );
+        const pageValue = req.query.page;
+        const limitValue = req.query.limit;
 
-        const limit = Math.min(
-            50,
-            Math.max(
-                1,
-                Number.parseInt(req.query.limit, 10) || 10
-            )
-        );
+        const page = pageValue === undefined ? 1 : Number(pageValue);
+        const limit = limitValue === undefined ? 10 : Number(limitValue);
+
+        if (
+            !Number.isSafeInteger(page) ||
+            page < 1 ||
+            page > 1000000 ||
+            !Number.isSafeInteger(limit) ||
+            limit < 1 ||
+            limit > 50
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: "Invalid pagination parameters",
+            });
+        }
 
         const skip = (page - 1) * limit;
 

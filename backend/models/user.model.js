@@ -36,17 +36,6 @@ const userSchema = new mongoose.Schema(
 
         walletBalance: {
             type: Number,
-            default: 0,
-            min: 0,
-        },
-
-        faceEnrolled: {
-            type: Boolean,
-            default: false,
-        },
-
-        walletBalance: {
-            type: Number,
             default: 5000,
             min: 0,
             validate: {
@@ -54,8 +43,47 @@ const userSchema = new mongoose.Schema(
                 message: "Wallet balance must be a whole number of rupees",
             },
         },
+
+        // Face enrollment information
+        faceEnrolled: {
+            type: Boolean,
+            default: false,
+        },
+
+        faceEmbeddingEncrypted: {
+            type: String,
+            select: false,
+        },
+
+        faceEmbeddingIv: {
+            type: String,
+            select: false,
+        },
+
+        faceEmbeddingAuthTag: {
+            type: String,
+            select: false,
+        },
+
+        faceEnrolledAt: {
+            type: Date,
+            default: null,
+        },
+
+        // Biometric consent information
+        faceConsentGiven: {
+            type: Boolean,
+            default: false,
+        },
+
+        faceConsentAt: {
+            type: Date,
+            default: null,
+        },
     },
-    { timestamps: true }
+    {
+        timestamps: true,
+    }
 );
 
 const User = mongoose.model("User", userSchema);
