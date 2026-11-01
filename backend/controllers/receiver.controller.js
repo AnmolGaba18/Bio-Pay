@@ -1,18 +1,36 @@
 
+import mongoose from "mongoose";
 import User from "../models/user.model.js";
 
 const getReceiverDetails = async (req, res) => {
     try {
         const { bioPayId } = req.params;
 
-        if (!bioPayId || typeof bioPayId !== "string") {
+        const authenticatedUserId =
+            req.user?._id || req.user?.id;
+
+        if (
+            !authenticatedUserId ||
+            !mongoose.isValidObjectId(authenticatedUserId)
+        ) {
+            return res.status(401).json({
+                success: false,
+                message: "Unauthorized: Invalid user",
+            });
+        }
+
+        if (
+            typeof bioPayId !== "string" ||
+            !bioPayId.trim()
+        ) {
             return res.status(400).json({
                 success: false,
                 message: "BioPay ID is required",
             });
         }
 
-        const normalizedBioPayId = bioPayId.trim().toUpperCase();
+        const normalizedBioPayId =
+            bioPayId.trim().toUpperCase();
 
         if (!/^BIO[A-F0-9]{10}$/.test(normalizedBioPayId)) {
             return res.status(400).json({
@@ -32,7 +50,10 @@ const getReceiverDetails = async (req, res) => {
             });
         }
 
-        if (receiver._id.toString() === req.user.id) {
+        if (
+            receiver._id.toString() ===
+            authenticatedUserId.toString()
+        ) {
             return res.status(400).json({
                 success: false,
                 message: "You cannot send money to yourself",
@@ -49,7 +70,10 @@ const getReceiverDetails = async (req, res) => {
         });
 
     } catch (error) {
-        console.error("Receiver lookup error:", error);
+        console.error(
+            "Receiver lookup error:",
+            error.message
+        );
 
         return res.status(500).json({
             success: false,

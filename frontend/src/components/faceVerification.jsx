@@ -1,450 +1,301 @@
 
-import mongoose from "mongoose";
-import { randomUUID } from "crypto";
+import { useEffect, useRef, useState } from "react";
 
-import User from "../models/user.model.js";
-import PaymentIntent from "../models/paymentIntent.model.js";
-import WalletTransaction from "../models/walletTransaction.model.js";
+const API_URL = (
+    import.meta.env.VITE_API_URL || "http://localhost:5000"
+).replace(/\/$/, "");
 
-import { generateFaceEmbedding } from "../services/biometric.service.js";
-import { decryptEmbedding } from "../services/encryption.service.js";
+const FaceVerification = ({
+    intentId,
+    token,
+    onVerified,
+    onCancel,
+}) => {
+    const videoRef = useRef(null);
+    const canvasRef = useRef(null);
+    const streamRef = useRef(null);
+    const previewUrlRef = useRef(null);
 
-// Provisional demo threshold. Requires proper calibration.
-const FACE_MATCH_THRESHOLD = 0.70;
+    const [cameraReady, setCameraReady] = useState(false);
+    const [cameraError, setCameraError] = useState("");
+    const [capturedImage, setCapturedImage] = useState(null);
+    const [capturedBlob, setCapturedBlob] = useState(null);
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState("");
 
-// Calculate cosine similarity
-const calculateSimilarity = (embedding1, embedding2) => {
-    if (
-        !Array.isArray(embedding1) ||
-        !Array.isArray(embedding2) ||
-        embedding1.length !== 512 ||
-        embedding2.length !== 512
-    ) {
-        throw new Error("Invalid face embeddings");
-    }
+    // START CAMERA
+    useEffect(() => {
+        let mounted = true;
 
-    let dotProduct = 0;
-    let magnitude1 = 0;
-    let magnitude2 = 0;
-
-    for (let i = 0; i < 512; i++) {
-        dotProduct += embedding1[i] * embedding2[i];
-        magnitude1 += embedding1[i] ** 2;
-        magnitude2 += embedding2[i] ** 2;
-    }
-
-    if (magnitude1 === 0 || magnitude2 === 0) {
-        throw new Error("Invalid face embeddings");
-    }
-
-    return dotProduct / (Math.sqrt(magnitude1) * Math.sqrt(magnitude2));
-};
-
-// CREATE PAYMENT INTENT
-const createPaymentIntent = async (req, res) => {
-    try {
-        const senderId = req.user.id;
-        const { receiverBioPayId, amount, description } = req.body;
-
-        if (!receiverBioPayId || amount === undefined) {
-            return res.status(400).json({
-                success: false,
-                message: "Receiver BioPay ID and amount are required",
-            });
-        }
-
-        if (
-            typeof amount !== "number" ||
-            !Number.isSafeInteger(amount) ||
-            amount <= 0
-        ) {
-            return res.status(400).json({
-                success: false,
-                message: "Amount must be a positive whole number of rupees",
-            });
-        }
-
-        if (
-            description !== undefined &&
-            (typeof description !== "string" || description.length > 150)
-        ) {
-            return res.status(400).json({
-                success: false,
-                message: "Invalid payment description",
-            });
-        }
-
-        const sender = await User.findById(senderId);
-
-        if (!sender) {
-            return res.status(404).json({
-                success: false,
-                message: "Sender account not found",
-            });
-        }
-
-        if (!sender.faceEnrolled) {
-            return res.status(403).json({
-                success: false,
-                message: "Please enroll your face before making payments",
-            });
-        }
-
-        const receiver = await User.findOne({
-            bioPayId: receiverBioPayId.trim(),
-        });
-
-        if (!receiver) {
-            return res.status(404).json({
-                success: false,
-                message: "Receiver not found",
-            });
-        }
-
-        if (sender._id.equals(receiver._id)) {
-            return res.status(400).json({
-                success: false,
-                message: "You cannot send money to yourself",
-            });
-        }
-
-        if (sender.walletBalance < amount) {
-            return res.status(400).json({
-                success: false,
-                message: "Insufficient wallet balance",
-            });
-        }
-
-        const expiresAt = new Date(Date.now() + 5 * 60 * 1000);
-
-        const paymentIntent = await PaymentIntent.create({
-            senderId: sender._id,
-            receiverId: receiver._id,
-            amount,
-            description: description?.trim() || "BioPay payment",
-            status: "PENDING",
-            expiresAt,
-        });
-
-        return res.status(201).json({
-            success: true,
-            message: "Payment intent created successfully",
-            payment: {
-                intentId: paymentIntent._id,
-                receiver: {
-                    fullName: receiver.fullName,
-                    bioPayId: receiver.bioPayId,
-                },
-                amount: paymentIntent.amount,
-                description: paymentIntent.description,
-                status: paymentIntent.status,
-                expiresAt: paymentIntent.expiresAt,
-            },
-        });
-    } catch (error) {
-        console.error("Create payment intent error:", error.message);
-
-        return res.status(500).json({
-            success: false,
-            message: "Unable to create payment intent",
-        });
-    }
-};
-
-// VERIFY FACE FOR A SPECIFIC PAYMENT
-const verifyPaymentFace = async (req, res) => {
-    try {
-        const senderId = req.user.id;
-        const { intentId } = req.params;
-
-        if (!mongoose.isValidObjectId(intentId)) {
-            return res.status(400).json({
-                success: false,
-                message: "Invalid payment intent ID",
-            });
-        }
-
-        if (!req.file) {
-            return res.status(400).json({
-                success: false,
-                message: "Face image is required",
-            });
-        }
-
-        const paymentIntent = await PaymentIntent.findOne({
-            _id: intentId,
-            senderId,
-        });
-
-        if (!paymentIntent) {
-            return res.status(404).json({
-                success: false,
-                message: "Payment intent not found",
-            });
-        }
-
-        if (paymentIntent.status !== "PENDING") {
-            return res.status(400).json({
-                success: false,
-                message: "Payment intent is not pending",
-            });
-        }
-
-        if (paymentIntent.expiresAt <= new Date()) {
-            paymentIntent.status = "EXPIRED";
-            await paymentIntent.save();
-
-            return res.status(400).json({
-                success: false,
-                message: "Payment intent has expired",
-            });
-        }
-
-        const user = await User.findById(senderId).select(
-            "+faceEmbeddingEncrypted +faceEmbeddingIv +faceEmbeddingAuthTag"
-        );
-
-        if (
-            !user ||
-            !user.faceEnrolled ||
-            !user.faceEmbeddingEncrypted ||
-            !user.faceEmbeddingIv ||
-            !user.faceEmbeddingAuthTag
-        ) {
-            return res.status(400).json({
-                success: false,
-                message: "Face enrollment not found",
-            });
-        }
-
-        const registeredEmbedding = decryptEmbedding({
-            encryptedData: user.faceEmbeddingEncrypted,
-            iv: user.faceEmbeddingIv,
-            authTag: user.faceEmbeddingAuthTag,
-        });
-
-        const liveEmbedding = await generateFaceEmbedding(
-            req.file.buffer,
-            req.file.mimetype,
-            req.file.originalname
-        );
-
-        const similarity = calculateSimilarity(
-            registeredEmbedding,
-            liveEmbedding
-        );
-
-        if (similarity < FACE_MATCH_THRESHOLD) {
-            return res.status(401).json({
-                success: false,
-                message: "Face verification failed",
-                biometric: {
-                    verified: false,
-                    similarity: Number(similarity.toFixed(4)),
-                },
-            });
-        }
-
-        const updatedIntent = await PaymentIntent.findOneAndUpdate(
-            {
-                _id: paymentIntent._id,
-                senderId,
-                status: "PENDING",
-                expiresAt: { $gt: new Date() },
-            },
-            {
-                $set: {
-                    status: "VERIFIED",
-                    faceVerifiedAt: new Date(),
-                },
-            },
-            {
-                returnDocument: "after",
-            }
-        );
-
-        if (!updatedIntent) {
-            return res.status(409).json({
-                success: false,
-                message: "Payment intent changed or expired. Please try again.",
-            });
-        }
-
-        return res.status(200).json({
-            success: true,
-            message: "Face verification successful. Payment is authorized.",
-            payment: {
-                intentId: updatedIntent._id,
-                amount: updatedIntent.amount,
-                status: updatedIntent.status,
-                verifiedAt: updatedIntent.faceVerifiedAt,
-            },
-            biometric: {
-                verified: true,
-                similarity: Number(similarity.toFixed(4)),
-            },
-        });
-    } catch (error) {
-        console.error("Payment face verification error:", error.message);
-
-        return res.status(500).json({
-            success: false,
-            message: "Payment face verification failed",
-        });
-    }
-};
-
-// CONFIRM PAYMENT AND TRANSFER MONEY
-const confirmPayment = async (req, res) => {
-    const session = await mongoose.startSession();
-
-    let paymentResult = null;
-
-    try {
-        const senderId = req.user.id;
-        const { intentId } = req.params;
-
-        if (!mongoose.isValidObjectId(intentId)) {
-            return res.status(400).json({
-                success: false,
-                message: "Invalid payment intent ID",
-            });
-        }
-
-        await session.withTransaction(async () => {
-            const now = new Date();
-            const referenceId = randomUUID();
-
-            // Claim the verified payment intent.
-            // This prevents reuse and concurrent confirmation.
-            const paymentIntent = await PaymentIntent.findOneAndUpdate(
-                {
-                    _id: intentId,
-                    senderId,
-                    status: "VERIFIED",
-                    expiresAt: { $gt: now },
-                },
-                {
-                    $set: {
-                        status: "COMPLETED",
-                        completedAt: now,
-                        referenceId,
-                    },
-                },
-                {
-                    new: true,
-                    session,
+        const startCamera = async () => {
+            try {
+                if (!navigator.mediaDevices?.getUserMedia) {
+                    throw new Error(
+                        "Camera access is not supported by this browser or connection."
+                    );
                 }
-            );
 
-            if (!paymentIntent) {
-                const error = new Error(
-                    "Payment is not verified, has expired, or was already processed"
+                const stream = await navigator.mediaDevices.getUserMedia({
+                    video: {
+                        facingMode: "user",
+                        width: { ideal: 1280 },
+                        height: { ideal: 720 },
+                    },
+                    audio: false,
+                });
+
+                if (!mounted) {
+                    stream.getTracks().forEach((track) => track.stop());
+                    return;
+                }
+
+                streamRef.current = stream;
+
+                if (videoRef.current) {
+                    videoRef.current.srcObject = stream;
+                    await videoRef.current.play();
+                    setCameraReady(true);
+                }
+
+            } catch (err) {
+                if (mounted) {
+                    setCameraError(
+                        err.name === "NotAllowedError"
+                            ? "Camera permission denied. Please allow camera access."
+                            : err.message || "Unable to access camera."
+                    );
+                }
+            }
+        };
+
+        startCamera();
+
+        return () => {
+            mounted = false;
+
+            if (streamRef.current) {
+                streamRef.current.getTracks().forEach(
+                    (track) => track.stop()
                 );
-                error.statusCode = 400;
-                throw error;
+                streamRef.current = null;
             }
 
-            // Debit sender only if sufficient balance exists
-            const sender = await User.findOneAndUpdate(
+            if (previewUrlRef.current) {
+                URL.revokeObjectURL(previewUrlRef.current);
+                previewUrlRef.current = null;
+            }
+        };
+    }, []);
+
+    // CAPTURE FACE IMAGE
+    const captureImage = () => {
+        setError("");
+
+        const video = videoRef.current;
+        const canvas = canvasRef.current;
+
+        if (!video || !canvas || video.readyState < 2) {
+            setError("Camera is not ready. Please try again.");
+            return;
+        }
+
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+
+        const context = canvas.getContext("2d");
+
+        if (!context) {
+            setError("Unable to capture image.");
+            return;
+        }
+
+        context.drawImage(
+            video,
+            0,
+            0,
+            canvas.width,
+            canvas.height
+        );
+
+        canvas.toBlob(
+            (blob) => {
+                if (!blob) {
+                    setError("Image capture failed. Please try again.");
+                    return;
+                }
+
+                if (previewUrlRef.current) {
+                    URL.revokeObjectURL(previewUrlRef.current);
+                }
+
+                const imageUrl = URL.createObjectURL(blob);
+
+                previewUrlRef.current = imageUrl;
+
+                setCapturedBlob(blob);
+                setCapturedImage(imageUrl);
+            },
+            "image/jpeg",
+            0.9
+        );
+    };
+
+    // RETAKE IMAGE
+    const retakeImage = () => {
+        setCapturedBlob(null);
+        setCapturedImage(null);
+        setError("");
+    };
+
+    // UPLOAD IMAGE AND VERIFY FACE
+    const verifyFace = async () => {
+        if (!intentId || !token) {
+            setError("Payment intent or authentication token is missing.");
+            return;
+        }
+
+        if (!capturedBlob) {
+            setError("Please capture your face image first.");
+            return;
+        }
+
+        setLoading(true);
+        setError("");
+
+        try {
+            const formData = new FormData();
+
+            formData.append(
+                "file",
+                capturedBlob,
+                "face-verification.jpg"
+            );
+
+            const response = await fetch(
+                `${API_URL}/api/v1/payment-intents/${encodeURIComponent(intentId)}/verify-face`,
                 {
-                    _id: senderId,
-                    walletBalance: { $gte: paymentIntent.amount },
-                },
-                {
-                    $inc: {
-                        walletBalance: -paymentIntent.amount,
+                    method: "POST",
+                    headers: {
+                        Authorization: `Bearer ${token}`,
                     },
-                },
-                {
-                    returnDocument: "after",
-                    session,
+                    body: formData,
                 }
             );
 
-            if (!sender) {
-                const error = new Error("Insufficient wallet balance");
-                error.statusCode = 400;
-                throw error;
+            const result = await response.json();
+
+            if (!response.ok || !result.success) {
+                throw new Error(
+                    result.message || "Face verification failed."
+                );
             }
 
-            // Credit receiver
-            const receiver = await User.findOneAndUpdate(
-                {
-                    _id: paymentIntent.receiverId,
-                },
-                {
-                    $inc: {
-                        walletBalance: paymentIntent.amount,
-                    },
-                },
-                {
-                    returnDocument: "after",
-                    session,
-                }
-            );
-
-            if (!receiver) {
-                throw new Error("Receiver account not found");
+            if (result.biometric?.verified !== true) {
+                throw new Error("Face verification was not successful.");
             }
 
-            // Create sender and receiver transaction records
-            await WalletTransaction.create(
-                [
-                    {
-                        userId: sender._id,
-                        type: "PAYMENT",
-                        amount: paymentIntent.amount,
-                        balanceAfter: sender.walletBalance,
-                        description: paymentIntent.description,
-                        referenceId,
-                    },
-                    {
-                        userId: receiver._id,
-                        type: "RECEIVED",
-                        amount: paymentIntent.amount,
-                        balanceAfter: receiver.walletBalance,
-                        description: `Received from ${sender.fullName}`,
-                        referenceId,
-                    },
-                ],
-                {
-                    session,
-                    ordered: true,
-                }
+            if (typeof onVerified === "function") {
+                onVerified(result);
+            }
+
+        } catch (err) {
+            setError(
+                err.message || "Unable to complete face verification."
             );
+        } finally {
+            setLoading(false);
+        }
+    };
 
-            paymentResult = {
-                referenceId,
-                amount: paymentIntent.amount,
-                senderBalance: sender.walletBalance,
-                receiverBalance: receiver.walletBalance,
-                receiverName: receiver.fullName,
-                status: "COMPLETED",
-            };
-        });
+    return (
+        <div className="face-verification">
+            <h2>Face Verification</h2>
 
-        return res.status(200).json({
-            success: true,
-            message: "Payment completed successfully",
-            payment: paymentResult,
-        });
-    } catch (error) {
-        console.error("Payment confirmation error:", error.message);
+            <p>
+                Position your face clearly inside the camera frame.
+            </p>
 
-        return res.status(error.statusCode || 500).json({
-            success: false,
-            message: error.statusCode
-                ? error.message
-                : "Payment could not be completed",
-        });
-    } finally {
-        await session.endSession();
-    }
+            {cameraError && (
+                <div role="alert" className="face-error">
+                    {cameraError}
+                </div>
+            )}
+
+            {error && (
+                <div role="alert" className="face-error">
+                    {error}
+                </div>
+            )}
+
+            <div className="face-camera-container">
+                {!capturedImage ? (
+                    <video
+                        ref={videoRef}
+                        autoPlay
+                        muted
+                        playsInline
+                        className="face-camera"
+                    />
+                ) : (
+                    <img
+                        src={capturedImage}
+                        alt="Captured face"
+                        className="face-preview"
+                    />
+                )}
+            </div>
+
+            <canvas
+                ref={canvasRef}
+                style={{ display: "none" }}
+            />
+
+            <div className="face-actions">
+                {!capturedImage ? (
+                    <button
+                        type="button"
+                        onClick={captureImage}
+                        disabled={!cameraReady || loading}
+                    >
+                        Capture Face
+                    </button>
+                ) : (
+                    <>
+                        <button
+                            type="button"
+                            onClick={retakeImage}
+                            disabled={loading}
+                        >
+                            Retake
+                        </button>
+
+                        <button
+                            type="button"
+                            onClick={verifyFace}
+                            disabled={loading}
+                        >
+                            {loading ? "Verifying..." : "Verify Face"}
+                        </button>
+                    </>
+                )}
+
+                {onCancel && (
+                    <button
+                        type="button"
+                        onClick={onCancel}
+                        disabled={loading}
+                    >
+                        Cancel
+                    </button>
+                )}
+            </div>
+
+            <p className="face-disclaimer">
+                Face matching does not currently include liveness detection.
+                A photograph or replayed image may pass verification.
+            </p>
+        </div>
+    );
 };
 
-export {
-    createPaymentIntent,
-    verifyPaymentFace,
-    confirmPayment,
-};
+export default FaceVerification;

@@ -1,11 +1,15 @@
-
 import jwt from "jsonwebtoken";
+import mongoose from "mongoose";
 
 const verifyJWT = (req, res, next) => {
     try {
+        // Check authorization header
         const authHeader = req.headers.authorization;
 
-        if (!authHeader || !authHeader.startsWith("Bearer ")) {
+        if (
+            !authHeader ||
+            !authHeader.startsWith("Bearer ")
+        ) {
             return res.status(401).json({
                 success: false,
                 message: "Unauthorized: Token missing",
@@ -21,8 +25,9 @@ const verifyJWT = (req, res, next) => {
             });
         }
 
+        // Validate JWT secret
         if (!process.env.JWT_SECRET) {
-            console.error("JWT_SECRET is missing");
+            console.error("JWT_SECRET is missing from environment variables");
 
             return res.status(500).json({
                 success: false,
@@ -30,6 +35,7 @@ const verifyJWT = (req, res, next) => {
             });
         }
 
+        // Verify token signature and expiry
         const decodedToken = jwt.verify(
             token,
             process.env.JWT_SECRET,
@@ -38,10 +44,12 @@ const verifyJWT = (req, res, next) => {
             }
         );
 
+        // Validate token payload
         if (
             !decodedToken ||
             typeof decodedToken !== "object" ||
-            !decodedToken._id
+            !decodedToken._id ||
+            !mongoose.isValidObjectId(decodedToken._id)
         ) {
             return res.status(401).json({
                 success: false,
@@ -58,9 +66,28 @@ const verifyJWT = (req, res, next) => {
         next();
 
     } catch (error) {
-        return res.status(401).json({
+        if (error.name === "TokenExpiredError") {
+            return res.status(401).json({
+                success: false,
+                message: "Authentication token has expired",
+            });
+        }
+
+        if (
+            error.name === "JsonWebTokenError" ||
+            error.name === "NotBeforeError"
+        ) {
+            return res.status(401).json({
+                success: false,
+                message: "Invalid authentication token",
+            });
+        }
+
+        console.error("Authentication middleware error:", error.message);
+
+        return res.status(500).json({
             success: false,
-            message: "Invalid or expired token",
+            message: "Authentication service error",
         });
     }
 };

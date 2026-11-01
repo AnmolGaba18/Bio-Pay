@@ -1,7 +1,10 @@
 
+import mongoose from "mongoose";
+
 import User from "../models/user.model.js";
 
 import { generateFaceEmbedding } from "../services/biometric.service.js";
+
 import {
     encryptEmbedding,
     decryptEmbedding,
@@ -10,7 +13,20 @@ import {
 // Provisional demo threshold. Requires proper calibration.
 const FACE_MATCH_THRESHOLD = 0.70;
 
-// Calculate cosine similarity
+
+// GET AUTHENTICATED USER ID
+const getAuthenticatedUserId = (req) => {
+    const userId = req.user?._id || req.user?.id;
+
+    if (!userId || !mongoose.isValidObjectId(userId)) {
+        return null;
+    }
+
+    return userId;
+};
+
+
+// COSINE SIMILARITY
 const calculateSimilarity = (embedding1, embedding2) => {
     if (
         !Array.isArray(embedding1) ||
@@ -26,24 +42,55 @@ const calculateSimilarity = (embedding1, embedding2) => {
     let magnitude2 = 0;
 
     for (let i = 0; i < 512; i++) {
-        dotProduct += embedding1[i] * embedding2[i];
-        magnitude1 += embedding1[i] ** 2;
-        magnitude2 += embedding2[i] ** 2;
+        const value1 = embedding1[i];
+        const value2 = embedding2[i];
+
+        if (
+            typeof value1 !== "number" ||
+            typeof value2 !== "number" ||
+            !Number.isFinite(value1) ||
+            !Number.isFinite(value2)
+        ) {
+            throw new Error("Invalid face embedding values");
+        }
+
+        dotProduct += value1 * value2;
+        magnitude1 += value1 ** 2;
+        magnitude2 += value2 ** 2;
     }
 
     if (magnitude1 === 0 || magnitude2 === 0) {
         throw new Error("Invalid face embeddings");
     }
 
-    return dotProduct / (Math.sqrt(magnitude1) * Math.sqrt(magnitude2));
+    const similarity =
+        dotProduct / (Math.sqrt(magnitude1) * Math.sqrt(magnitude2));
+
+    if (!Number.isFinite(similarity)) {
+        throw new Error("Unable to calculate face similarity");
+    }
+
+    return Math.max(-1, Math.min(1, similarity));
 };
+
 
 // ENROLL FACE WITH EXPLICIT CONSENT
 const enrollFace = async (req, res) => {
     try {
-        const userId = req.user.id;
+        const userId = getAuthenticatedUserId(req);
 
-        if (req.body.consent !== "true" && req.body.consent !== true) {
+        if (!userId) {
+            return res.status(401).json({
+                success: false,
+                message: "Invalid authentication identity",
+            });
+        }
+
+        // Require explicit consent
+        if (
+            req.body.consent !== "true" &&
+            req.body.consent !== true
+        ) {
             return res.status(400).json({
                 success: false,
                 message: "Biometric consent is required before enrollment",
@@ -66,25 +113,58 @@ const enrollFace = async (req, res) => {
             });
         }
 
+        // Generate face embedding
         const embedding = await generateFaceEmbedding(
             req.file.buffer,
             req.file.mimetype,
             req.file.originalname
         );
 
+        if (
+            !Array.isArray(embedding) ||
+            embedding.length !== 512 ||
+            !embedding.every(
+                (value) =>
+                    typeof value === "number" &&
+                    Number.isFinite(value)
+            )
+        ) {
+            throw new Error("Biometric service returned an invalid embedding");
+        }
+
+        // Encrypt embedding before database storage
         const encryptedData = encryptEmbedding(embedding);
 
-        user.faceEmbeddingEncrypted = encryptedData.encryptedData;
-        user.faceEmbeddingIv = encryptedData.iv;
-        user.faceEmbeddingAuthTag = encryptedData.authTag;
+        const enrolledAt = new Date();
 
-        user.faceEnrolled = true;
-        user.faceEnrolledAt = new Date();
+        // Update only the authenticated user's biometric data
+        const updatedUser = await User.findByIdAndUpdate(
+            userId,
+            {
+                $set: {
+                    faceEmbeddingEncrypted: encryptedData.encryptedData,
+                    faceEmbeddingIv: encryptedData.iv,
+                    faceEmbeddingAuthTag: encryptedData.authTag,
 
-        user.faceConsentGiven = true;
-        user.faceConsentAt = new Date();
+                    faceEnrolled: true,
+                    faceEnrolledAt: enrolledAt,
 
-        await user.save();
+                    faceConsentGiven: true,
+                    faceConsentAt: enrolledAt,
+                },
+            },
+            {
+                new: true,
+                runValidators: true,
+            }
+        );
+
+        if (!updatedUser) {
+            return res.status(404).json({
+                success: false,
+                message: "User account not found",
+            });
+        }
 
         return res.status(200).json({
             success: true,
@@ -92,9 +172,10 @@ const enrollFace = async (req, res) => {
             biometric: {
                 faceEnrolled: true,
                 consentGiven: true,
-                enrolledAt: user.faceEnrolledAt,
+                enrolledAt: updatedUser.faceEnrolledAt,
             },
         });
+
     } catch (error) {
         console.error("Face enrollment error:", error.message);
 
@@ -105,10 +186,18 @@ const enrollFace = async (req, res) => {
     }
 };
 
+
 // VERIFY ENROLLED FACE
 const verifyFace = async (req, res) => {
     try {
-        const userId = req.user.id;
+        const userId = getAuthenticatedUserId(req);
+
+        if (!userId) {
+            return res.status(401).json({
+                success: false,
+                message: "Invalid authentication identity",
+            });
+        }
 
         if (!req.file) {
             return res.status(400).json({
@@ -128,31 +217,37 @@ const verifyFace = async (req, res) => {
             });
         }
 
+        // Check current enrollment and consent
         if (
             !user.faceEnrolled ||
             !user.faceConsentGiven ||
+            !user.faceConsentAt ||
+            !user.faceEnrolledAt ||
             !user.faceEmbeddingEncrypted ||
             !user.faceEmbeddingIv ||
             !user.faceEmbeddingAuthTag
         ) {
-            return res.status(400).json({
+            return res.status(403).json({
                 success: false,
                 message: "Face enrollment or biometric consent not found",
             });
         }
 
+        // Decrypt registered embedding
         const registeredEmbedding = decryptEmbedding({
             encryptedData: user.faceEmbeddingEncrypted,
             iv: user.faceEmbeddingIv,
             authTag: user.faceEmbeddingAuthTag,
         });
 
+        // Generate embedding from submitted image
         const liveEmbedding = await generateFaceEmbedding(
             req.file.buffer,
             req.file.mimetype,
             req.file.originalname
         );
 
+        // Compare embeddings
         const similarity = calculateSimilarity(
             registeredEmbedding,
             liveEmbedding
@@ -170,6 +265,7 @@ const verifyFace = async (req, res) => {
                 similarity: Number(similarity.toFixed(4)),
             },
         });
+
     } catch (error) {
         console.error("Face verification error:", error.message);
 
@@ -180,12 +276,40 @@ const verifyFace = async (req, res) => {
     }
 };
 
+
 // DELETE ENROLLED FACE DATA AND REVOKE CONSENT
 const deleteFaceEnrollment = async (req, res) => {
     try {
-        const userId = req.user.id;
+        const userId = getAuthenticatedUserId(req);
 
-        const user = await User.findById(userId);
+        if (!userId) {
+            return res.status(401).json({
+                success: false,
+                message: "Invalid authentication identity",
+            });
+        }
+
+        // Remove encrypted embedding and revoke consent atomically
+        const user = await User.findByIdAndUpdate(
+            userId,
+            {
+                $unset: {
+                    faceEmbeddingEncrypted: "",
+                    faceEmbeddingIv: "",
+                    faceEmbeddingAuthTag: "",
+                },
+                $set: {
+                    faceEnrolled: false,
+                    faceEnrolledAt: null,
+                    faceConsentGiven: false,
+                    faceConsentAt: null,
+                },
+            },
+            {
+                new: true,
+                runValidators: true,
+            }
+        );
 
         if (!user) {
             return res.status(404).json({
@@ -193,18 +317,6 @@ const deleteFaceEnrollment = async (req, res) => {
                 message: "User account not found",
             });
         }
-
-        user.faceEmbeddingEncrypted = undefined;
-        user.faceEmbeddingIv = undefined;
-        user.faceEmbeddingAuthTag = undefined;
-
-        user.faceEnrolled = false;
-        user.faceEnrolledAt = null;
-
-        user.faceConsentGiven = false;
-        user.faceConsentAt = null;
-
-        await user.save();
 
         return res.status(200).json({
             success: true,
@@ -214,6 +326,7 @@ const deleteFaceEnrollment = async (req, res) => {
                 consentGiven: false,
             },
         });
+
     } catch (error) {
         console.error("Face deletion error:", error.message);
 
@@ -223,6 +336,7 @@ const deleteFaceEnrollment = async (req, res) => {
         });
     }
 };
+
 
 export {
     enrollFace,

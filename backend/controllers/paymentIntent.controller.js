@@ -9,9 +9,16 @@ import WalletTransaction from "../models/walletTransaction.model.js";
 import { generateFaceEmbedding } from "../services/biometric.service.js";
 import { decryptEmbedding } from "../services/encryption.service.js";
 
+// Configuration
 const FACE_MATCH_THRESHOLD = 0.70;
 const FACE_AUTHORIZATION_VALIDITY = 5 * 60 * 1000;
+const PAYMENT_INTENT_VALIDITY = 5 * 60 * 1000;
 
+// Demo transaction limit: ₹1,00,000 per payment
+const MAX_PAYMENT_AMOUNT = 100000;
+
+
+// COSINE SIMILARITY
 const calculateSimilarity = (embedding1, embedding2) => {
     if (
         !Array.isArray(embedding1) ||
@@ -27,25 +34,60 @@ const calculateSimilarity = (embedding1, embedding2) => {
     let magnitude2 = 0;
 
     for (let i = 0; i < 512; i++) {
-        dotProduct += embedding1[i] * embedding2[i];
-        magnitude1 += embedding1[i] ** 2;
-        magnitude2 += embedding2[i] ** 2;
+        const value1 = embedding1[i];
+        const value2 = embedding2[i];
+
+        if (
+            typeof value1 !== "number" ||
+            typeof value2 !== "number" ||
+            !Number.isFinite(value1) ||
+            !Number.isFinite(value2)
+        ) {
+            throw new Error("Invalid face embedding values");
+        }
+
+        dotProduct += value1 * value2;
+        magnitude1 += value1 ** 2;
+        magnitude2 += value2 ** 2;
     }
 
     if (magnitude1 === 0 || magnitude2 === 0) {
         throw new Error("Invalid face embeddings");
     }
 
-    return dotProduct / (Math.sqrt(magnitude1) * Math.sqrt(magnitude2));
+    const similarity =
+        dotProduct / (Math.sqrt(magnitude1) * Math.sqrt(magnitude2));
+
+    if (!Number.isFinite(similarity)) {
+        throw new Error("Unable to calculate face similarity");
+    }
+
+    return Math.max(-1, Math.min(1, similarity));
 };
+
 
 // CREATE PAYMENT INTENT
 const createPaymentIntent = async (req, res) => {
     try {
-        const senderId = req.user.id;
+        const senderId = req.user?._id || req.user?.id;
+
         const { receiverBioPayId, amount, description } = req.body;
 
-        if (!receiverBioPayId || amount === undefined) {
+        if (
+            !senderId ||
+            !mongoose.isValidObjectId(senderId)
+        ) {
+            return res.status(401).json({
+                success: false,
+                message: "Invalid authentication identity",
+            });
+        }
+
+        if (
+            typeof receiverBioPayId !== "string" ||
+            !receiverBioPayId.trim() ||
+            amount === undefined
+        ) {
             return res.status(400).json({
                 success: false,
                 message: "Receiver BioPay ID and amount are required",
@@ -55,21 +97,25 @@ const createPaymentIntent = async (req, res) => {
         if (
             typeof amount !== "number" ||
             !Number.isSafeInteger(amount) ||
-            amount <= 0
+            amount < 1 ||
+            amount > MAX_PAYMENT_AMOUNT
         ) {
             return res.status(400).json({
                 success: false,
-                message: "Amount must be a positive whole number of rupees",
+                message: `Payment amount must be between ₹1 and ₹${MAX_PAYMENT_AMOUNT}`,
             });
         }
 
         if (
             description !== undefined &&
-            (typeof description !== "string" || description.length > 150)
+            (
+                typeof description !== "string" ||
+                description.trim().length > 150
+            )
         ) {
             return res.status(400).json({
                 success: false,
-                message: "Invalid payment description",
+                message: "Payment description must not exceed 150 characters",
             });
         }
 
@@ -82,10 +128,21 @@ const createPaymentIntent = async (req, res) => {
             });
         }
 
-        if (!sender.faceEnrolled || !sender.faceConsentGiven) {
+        if (
+            !sender.faceEnrolled ||
+            !sender.faceConsentGiven ||
+            !sender.faceConsentAt
+        ) {
             return res.status(403).json({
                 success: false,
-                message: "Face enrollment and biometric consent are required",
+                message: "Face enrollment and valid biometric consent are required",
+            });
+        }
+
+        if (sender.walletBalance < amount) {
+            return res.status(400).json({
+                success: false,
+                message: "Insufficient wallet balance",
             });
         }
 
@@ -107,20 +164,13 @@ const createPaymentIntent = async (req, res) => {
             });
         }
 
-        if (sender.walletBalance < amount) {
-            return res.status(400).json({
-                success: false,
-                message: "Insufficient wallet balance",
-            });
-        }
-
         const paymentIntent = await PaymentIntent.create({
             senderId: sender._id,
             receiverId: receiver._id,
             amount,
             description: description?.trim() || "BioPay payment",
             status: "PENDING",
-            expiresAt: new Date(Date.now() + FACE_AUTHORIZATION_VALIDITY),
+            expiresAt: new Date(Date.now() + PAYMENT_INTENT_VALIDITY),
         });
 
         return res.status(201).json({
@@ -137,6 +187,7 @@ const createPaymentIntent = async (req, res) => {
                 expiresAt: paymentIntent.expiresAt,
             },
         });
+
     } catch (error) {
         console.error("Create payment intent error:", error.message);
 
@@ -147,11 +198,22 @@ const createPaymentIntent = async (req, res) => {
     }
 };
 
-// VERIFY FACE FOR A SPECIFIC PAYMENT
+
+// VERIFY FACE FOR PAYMENT
 const verifyPaymentFace = async (req, res) => {
     try {
-        const senderId = req.user.id;
+        const senderId = req.user?._id || req.user?.id;
         const { intentId } = req.params;
+
+        if (
+            !senderId ||
+            !mongoose.isValidObjectId(senderId)
+        ) {
+            return res.status(401).json({
+                success: false,
+                message: "Invalid authentication identity",
+            });
+        }
 
         if (!mongoose.isValidObjectId(intentId)) {
             return res.status(400).json({
@@ -190,6 +252,7 @@ const verifyPaymentFace = async (req, res) => {
             !user.faceEnrolled ||
             !user.faceConsentGiven ||
             !user.faceConsentAt ||
+            !user.faceEnrolledAt ||
             !user.faceEmbeddingEncrypted ||
             !user.faceEmbeddingIv ||
             !user.faceEmbeddingAuthTag
@@ -200,18 +263,21 @@ const verifyPaymentFace = async (req, res) => {
             });
         }
 
+        // Decrypt registered embedding
         const registeredEmbedding = decryptEmbedding({
             encryptedData: user.faceEmbeddingEncrypted,
             iv: user.faceEmbeddingIv,
             authTag: user.faceEmbeddingAuthTag,
         });
 
+        // Generate embedding from submitted image
         const liveEmbedding = await generateFaceEmbedding(
             req.file.buffer,
             req.file.mimetype,
             req.file.originalname
         );
 
+        // Compare embeddings
         const similarity = calculateSimilarity(
             registeredEmbedding,
             liveEmbedding
@@ -228,17 +294,20 @@ const verifyPaymentFace = async (req, res) => {
             });
         }
 
+        // Only one verification can authorize this pending intent
+        const verifiedAt = new Date();
+
         const updatedIntent = await PaymentIntent.findOneAndUpdate(
             {
                 _id: intentId,
                 senderId,
                 status: "PENDING",
-                expiresAt: { $gt: new Date() },
+                expiresAt: { $gt: verifiedAt },
             },
             {
                 $set: {
                     status: "VERIFIED",
-                    faceVerifiedAt: new Date(),
+                    faceVerifiedAt: verifiedAt,
                 },
             },
             {
@@ -267,6 +336,7 @@ const verifyPaymentFace = async (req, res) => {
                 similarity: Number(similarity.toFixed(4)),
             },
         });
+
     } catch (error) {
         console.error("Payment face verification error:", error.message);
 
@@ -277,13 +347,24 @@ const verifyPaymentFace = async (req, res) => {
     }
 };
 
+
 // CONFIRM PAYMENT
 const confirmPayment = async (req, res) => {
     let session;
 
     try {
-        const senderId = req.user.id;
+        const senderId = req.user?._id || req.user?.id;
         const { intentId } = req.params;
+
+        if (
+            !senderId ||
+            !mongoose.isValidObjectId(senderId)
+        ) {
+            return res.status(401).json({
+                success: false,
+                message: "Invalid authentication identity",
+            });
+        }
 
         if (!mongoose.isValidObjectId(intentId)) {
             return res.status(400).json({
@@ -298,8 +379,10 @@ const confirmPayment = async (req, res) => {
 
         await session.withTransaction(async () => {
             const now = new Date();
+
             const referenceId = randomUUID();
 
+            // Claim the verified payment intent exactly once
             const paymentIntent = await PaymentIntent.findOneAndUpdate(
                 {
                     _id: intentId,
@@ -307,7 +390,10 @@ const confirmPayment = async (req, res) => {
                     status: "VERIFIED",
                     expiresAt: { $gt: now },
                     faceVerifiedAt: {
-                        $gt: new Date(now.getTime() - FACE_AUTHORIZATION_VALIDITY),
+                        $gt: new Date(
+                            now.getTime() - FACE_AUTHORIZATION_VALIDITY
+                        ),
+                        $lte: now,
                     },
                 },
                 {
@@ -325,28 +411,32 @@ const confirmPayment = async (req, res) => {
 
             if (!paymentIntent) {
                 const error = new Error(
-                    "Payment is not verified, expired, or already processed"
+                    "Payment is not verified, expired or already processed"
                 );
                 error.statusCode = 400;
                 throw error;
             }
 
-            // Recheck consent at confirmation time
+            const amount = paymentIntent.amount;
+
+            // Recheck biometric consent and debit sender atomically
             const sender = await User.findOneAndUpdate(
                 {
                     _id: senderId,
                     faceEnrolled: true,
                     faceConsentGiven: true,
-                    walletBalance: { $gte: paymentIntent.amount },
+                    faceConsentAt: { $ne: null },
+                    walletBalance: { $gte: amount },
                 },
                 {
                     $inc: {
-                        walletBalance: -paymentIntent.amount,
+                        walletBalance: -amount,
                     },
                 },
                 {
                     returnDocument: "after",
                     session,
+                    runValidators: true,
                 }
             );
 
@@ -358,31 +448,41 @@ const confirmPayment = async (req, res) => {
                 throw error;
             }
 
+            // Credit receiver without allowing balance overflow
             const receiver = await User.findOneAndUpdate(
                 {
                     _id: paymentIntent.receiverId,
+                    walletBalance: {
+                        $lte: Number.MAX_SAFE_INTEGER - amount,
+                    },
                 },
                 {
                     $inc: {
-                        walletBalance: paymentIntent.amount,
+                        walletBalance: amount,
                     },
                 },
                 {
                     returnDocument: "after",
                     session,
+                    runValidators: true,
                 }
             );
 
             if (!receiver) {
-                throw new Error("Receiver account not found");
+                const error = new Error(
+                    "Receiver account not found or wallet balance limit exceeded"
+                );
+                error.statusCode = 409;
+                throw error;
             }
 
+            // Create sender and receiver transaction records atomically
             await WalletTransaction.create(
                 [
                     {
                         userId: sender._id,
                         type: "PAYMENT",
-                        amount: paymentIntent.amount,
+                        amount,
                         balanceAfter: sender.walletBalance,
                         description: paymentIntent.description,
                         referenceId,
@@ -390,7 +490,7 @@ const confirmPayment = async (req, res) => {
                     {
                         userId: receiver._id,
                         type: "RECEIVED",
-                        amount: paymentIntent.amount,
+                        amount,
                         balanceAfter: receiver.walletBalance,
                         description: `Received from ${sender.fullName}`,
                         referenceId,
@@ -404,7 +504,7 @@ const confirmPayment = async (req, res) => {
 
             paymentResult = {
                 referenceId,
-                amount: paymentIntent.amount,
+                amount,
                 senderBalance: sender.walletBalance,
                 receiverBalance: receiver.walletBalance,
                 receiverName: receiver.fullName,
@@ -417,6 +517,7 @@ const confirmPayment = async (req, res) => {
             message: "Payment completed successfully",
             payment: paymentResult,
         });
+
     } catch (error) {
         console.error("Payment confirmation error:", error.message);
 
@@ -426,12 +527,14 @@ const confirmPayment = async (req, res) => {
                 ? error.message
                 : "Payment could not be completed",
         });
+
     } finally {
         if (session) {
             await session.endSession();
         }
     }
 };
+
 
 export {
     createPaymentIntent,

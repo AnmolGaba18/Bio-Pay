@@ -1,22 +1,37 @@
-const BIOMETRIC_SERVICE_URL =
-    process.env.BIOMETRIC_SERVICE_URL || "http://127.0.0.1:8000";
+
+const getBiometricServiceURL = () => {
+    return (
+        process.env.BIOMETRIC_SERVICE_URL ||
+        "http://127.0.0.1:8000"
+    ).replace(/\/+$/, "");
+};
+
 
 const generateFaceEmbedding = async (
     imageBuffer,
     mimetype,
     filename = "face.jpg"
 ) => {
-
-    if (!imageBuffer || !Buffer.isBuffer(imageBuffer)) {
+    if (!Buffer.isBuffer(imageBuffer) || imageBuffer.length === 0) {
         throw new Error("Valid image buffer is required");
+    }
+
+    if (imageBuffer.length > 5 * 1024 * 1024) {
+        throw new Error("Image size must not exceed 5 MB");
     }
 
     if (!["image/jpeg", "image/png"].includes(mimetype)) {
         throw new Error("Only JPEG and PNG images are supported");
     }
 
+    if (
+        typeof filename !== "string" ||
+        !filename.trim()
+    ) {
+        filename = "face.jpg";
+    }
+
     try {
-        // Prepare image for FastAPI
         const formData = new FormData();
 
         const imageBlob = new Blob(
@@ -24,11 +39,16 @@ const generateFaceEmbedding = async (
             { type: mimetype }
         );
 
-        formData.append("file", imageBlob, filename);
+        formData.append(
+            "file",
+            imageBlob,
+            filename.replace(/[^a-zA-Z0-9._-]/g, "_")
+        );
 
-        // Send image to Python biometric service
+        const serviceURL = getBiometricServiceURL();
+
         const response = await fetch(
-            `${BIOMETRIC_SERVICE_URL}/api/v1/biometric/enroll`,
+            `${serviceURL}/api/v1/biometric/enroll`,
             {
                 method: "POST",
                 body: formData,
@@ -36,42 +56,73 @@ const generateFaceEmbedding = async (
             }
         );
 
-        const result = await response.json();
+        let result;
 
-        if (!response.ok) {
+        try {
+            result = await response.json();
+        } catch {
             throw new Error(
-                result.detail || "Biometric service request failed"
+                "Biometric service returned an invalid response"
             );
         }
 
-        // Validate returned embedding
-        if (
-            !Array.isArray(result.embedding) ||
-            result.embedding.length !== 512
-        ) {
-            throw new Error("Invalid face embedding received");
+        if (!response.ok) {
+            const serviceMessage =
+                typeof result.detail === "string"
+                    ? result.detail
+                    : "Biometric service request failed";
+
+            throw new Error(serviceMessage);
         }
 
+        const embedding = result.embedding;
+
         if (
-            !result.embedding.every(
-                value => typeof value === "number" && Number.isFinite(value)
-            )
+            !Array.isArray(embedding) ||
+            embedding.length !== 512
         ) {
-            throw new Error("Face embedding contains invalid values");
+            throw new Error(
+                "Invalid face embedding received from biometric service"
+            );
         }
 
-        return result.embedding;
+        const validEmbedding = embedding.every(
+            (value) =>
+                typeof value === "number" &&
+                Number.isFinite(value)
+        );
+
+        if (!validEmbedding) {
+            throw new Error(
+                "Face embedding contains invalid values"
+            );
+        }
+
+        return embedding;
 
     } catch (error) {
-
-        console.error("Biometric service error:", error.message);
-
-        throw new Error(
-            error.name === "TimeoutError"
-                ? "Biometric service request timed out"
-                : error.message
+        console.error(
+            "Biometric service error:",
+            error.message
         );
+
+        if (error.name === "TimeoutError") {
+            throw new Error(
+                "Biometric service request timed out"
+            );
+        }
+
+        if (error.name === "AbortError") {
+            throw new Error(
+                "Biometric service request was interrupted"
+            );
+        }
+
+        throw error;
     }
 };
 
-export { generateFaceEmbedding };
+
+export {
+    generateFaceEmbedding,
+};

@@ -14,6 +14,7 @@ const paymentIntentSchema = new mongoose.Schema(
             type: mongoose.Schema.Types.ObjectId,
             ref: "User",
             required: true,
+            index: true,
         },
 
         amount: {
@@ -54,6 +55,12 @@ const paymentIntentSchema = new mongoose.Schema(
         expiresAt: {
             type: Date,
             required: true,
+            validate: {
+                validator: (value) =>
+                    value instanceof Date &&
+                    !Number.isNaN(value.getTime()),
+                message: "A valid expiry date is required",
+            },
         },
 
         completedAt: {
@@ -65,12 +72,42 @@ const paymentIntentSchema = new mongoose.Schema(
             type: String,
             unique: true,
             sparse: true,
+            trim: true,
         },
     },
     {
         timestamps: true,
     }
 );
+
+
+// Sender and receiver must be different.
+paymentIntentSchema.pre("validate", function () {
+    if (
+        this.senderId &&
+        this.receiverId &&
+        this.senderId.equals(this.receiverId)
+    ) {
+        this.invalidate(
+            "receiverId",
+            "Sender and receiver cannot be the same user"
+        );
+    }
+});
+
+
+// Useful indexes for payment history and status queries.
+paymentIntentSchema.index({
+    senderId: 1,
+    status: 1,
+    createdAt: -1,
+});
+
+paymentIntentSchema.index({
+    receiverId: 1,
+    createdAt: -1,
+});
+
 
 const PaymentIntent = mongoose.model(
     "PaymentIntent",

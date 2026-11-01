@@ -7,6 +7,7 @@ const walletTransactionSchema = new mongoose.Schema(
             type: mongoose.Schema.Types.ObjectId,
             ref: "User",
             required: true,
+            index: true,
         },
 
         type: {
@@ -38,11 +39,13 @@ const walletTransactionSchema = new mongoose.Schema(
         description: {
             type: String,
             trim: true,
+            maxlength: 150,
             default: "",
         },
 
         referenceId: {
             type: String,
+            trim: true,
             index: true,
             sparse: true,
         },
@@ -51,6 +54,14 @@ const walletTransactionSchema = new mongoose.Schema(
         timestamps: true,
     }
 );
+
+
+// Efficient transaction history retrieval.
+walletTransactionSchema.index({
+    userId: 1,
+    createdAt: -1,
+});
+
 
 const WalletTransaction = mongoose.model(
     "WalletTransaction",
