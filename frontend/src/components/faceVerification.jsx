@@ -1,301 +1,310 @@
 
-import { useEffect, useRef, useState } from "react";
-
-const API_URL = (
-    import.meta.env.VITE_API_URL || "http://localhost:5000"
-).replace(/\/$/, "");
+import { useCallback, useEffect, useRef, useState } from "react";
 
 const FaceVerification = ({
-    intentId,
-    token,
-    onVerified,
-    onCancel,
+  intentId,
+  token,
+  onVerified,
+  onCancel,
 }) => {
-    const videoRef = useRef(null);
-    const canvasRef = useRef(null);
-    const streamRef = useRef(null);
-    const previewUrlRef = useRef(null);
+  const videoRef = useRef(null);
+  const streamRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const submittingRef = useRef(false);
 
-    const [cameraReady, setCameraReady] = useState(false);
-    const [cameraError, setCameraError] = useState("");
-    const [capturedImage, setCapturedImage] = useState(null);
-    const [capturedBlob, setCapturedBlob] = useState(null);
-    const [loading, setLoading] = useState(false);
-    const [error, setError] = useState("");
+  const [cameraReady, setCameraReady] = useState(false);
+  const [cameraLoading, setCameraLoading] = useState(false);
+  const [capturedImage, setCapturedImage] = useState(null);
+  const [error, setError] = useState("");
+  const [verifying, setVerifying] = useState(false);
 
-    // START CAMERA
-    useEffect(() => {
-        let mounted = true;
+  const stopCamera = useCallback(() => {
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
 
-        const startCamera = async () => {
-            try {
-                if (!navigator.mediaDevices?.getUserMedia) {
-                    throw new Error(
-                        "Camera access is not supported by this browser or connection."
-                    );
-                }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
 
-                const stream = await navigator.mediaDevices.getUserMedia({
-                    video: {
-                        facingMode: "user",
-                        width: { ideal: 1280 },
-                        height: { ideal: 720 },
-                    },
-                    audio: false,
-                });
+    setCameraReady(false);
+  }, []);
 
-                if (!mounted) {
-                    stream.getTracks().forEach((track) => track.stop());
-                    return;
-                }
+  const startCamera = async () => {
+    setError("");
+    setCapturedImage(null);
+    setCameraLoading(true);
 
-                streamRef.current = stream;
-
-                if (videoRef.current) {
-                    videoRef.current.srcObject = stream;
-                    await videoRef.current.play();
-                    setCameraReady(true);
-                }
-
-            } catch (err) {
-                if (mounted) {
-                    setCameraError(
-                        err.name === "NotAllowedError"
-                            ? "Camera permission denied. Please allow camera access."
-                            : err.message || "Unable to access camera."
-                    );
-                }
-            }
-        };
-
-        startCamera();
-
-        return () => {
-            mounted = false;
-
-            if (streamRef.current) {
-                streamRef.current.getTracks().forEach(
-                    (track) => track.stop()
-                );
-                streamRef.current = null;
-            }
-
-            if (previewUrlRef.current) {
-                URL.revokeObjectURL(previewUrlRef.current);
-                previewUrlRef.current = null;
-            }
-        };
-    }, []);
-
-    // CAPTURE FACE IMAGE
-    const captureImage = () => {
-        setError("");
-
-        const video = videoRef.current;
-        const canvas = canvasRef.current;
-
-        if (!video || !canvas || video.readyState < 2) {
-            setError("Camera is not ready. Please try again.");
-            return;
-        }
-
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-
-        const context = canvas.getContext("2d");
-
-        if (!context) {
-            setError("Unable to capture image.");
-            return;
-        }
-
-        context.drawImage(
-            video,
-            0,
-            0,
-            canvas.width,
-            canvas.height
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        throw new Error(
+          "Camera is not supported. Please use localhost or HTTPS."
         );
+      }
 
-        canvas.toBlob(
-            (blob) => {
-                if (!blob) {
-                    setError("Image capture failed. Please try again.");
-                    return;
-                }
+      stopCamera();
 
-                if (previewUrlRef.current) {
-                    URL.revokeObjectURL(previewUrlRef.current);
-                }
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: {
+          facingMode: "user",
+          width: { ideal: 640 },
+          height: { ideal: 480 },
+        },
+        audio: false,
+      });
 
-                const imageUrl = URL.createObjectURL(blob);
+      streamRef.current = stream;
 
-                previewUrlRef.current = imageUrl;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+      }
 
-                setCapturedBlob(blob);
-                setCapturedImage(imageUrl);
-            },
-            "image/jpeg",
-            0.9
-        );
-    };
+      setCameraReady(true);
+    } catch (err) {
+      console.error("Camera error:", err);
 
-    // RETAKE IMAGE
-    const retakeImage = () => {
-        setCapturedBlob(null);
-        setCapturedImage(null);
+      setError(
+        err.name === "NotAllowedError"
+          ? "Camera permission denied. Please allow camera access."
+          : err.message || "Unable to access camera."
+      );
+    } finally {
+      setCameraLoading(false);
+    }
+  };
+
+  const capturePhoto = () => {
+    const video = videoRef.current;
+
+    if (!video || !video.videoWidth || !video.videoHeight) {
+      setError("Camera is not ready. Please try again.");
+      return;
+    }
+
+    const canvas = document.createElement("canvas");
+
+    canvas.width = video.videoWidth;
+    canvas.height = video.videoHeight;
+
+    const context = canvas.getContext("2d");
+
+    if (!context) {
+      setError("Unable to capture image.");
+      return;
+    }
+
+    context.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+    canvas.toBlob(
+      (blob) => {
+        if (!blob) {
+          setError("Unable to capture image.");
+          return;
+        }
+
+        const imageUrl = URL.createObjectURL(blob);
+
+        setCapturedImage({
+          blob,
+          url: imageUrl,
+        });
+
         setError("");
-    };
-
-    // UPLOAD IMAGE AND VERIFY FACE
-    const verifyFace = async () => {
-        if (!intentId || !token) {
-            setError("Payment intent or authentication token is missing.");
-            return;
-        }
-
-        if (!capturedBlob) {
-            setError("Please capture your face image first.");
-            return;
-        }
-
-        setLoading(true);
-        setError("");
-
-        try {
-            const formData = new FormData();
-
-            formData.append(
-                "file",
-                capturedBlob,
-                "face-verification.jpg"
-            );
-
-            const response = await fetch(
-                `${API_URL}/api/v1/payment-intents/${encodeURIComponent(intentId)}/verify-face`,
-                {
-                    method: "POST",
-                    headers: {
-                        Authorization: `Bearer ${token}`,
-                    },
-                    body: formData,
-                }
-            );
-
-            const result = await response.json();
-
-            if (!response.ok || !result.success) {
-                throw new Error(
-                    result.message || "Face verification failed."
-                );
-            }
-
-            if (result.biometric?.verified !== true) {
-                throw new Error("Face verification was not successful.");
-            }
-
-            if (typeof onVerified === "function") {
-                onVerified(result);
-            }
-
-        } catch (err) {
-            setError(
-                err.message || "Unable to complete face verification."
-            );
-        } finally {
-            setLoading(false);
-        }
-    };
-
-    return (
-        <div className="face-verification">
-            <h2>Face Verification</h2>
-
-            <p>
-                Position your face clearly inside the camera frame.
-            </p>
-
-            {cameraError && (
-                <div role="alert" className="face-error">
-                    {cameraError}
-                </div>
-            )}
-
-            {error && (
-                <div role="alert" className="face-error">
-                    {error}
-                </div>
-            )}
-
-            <div className="face-camera-container">
-                {!capturedImage ? (
-                    <video
-                        ref={videoRef}
-                        autoPlay
-                        muted
-                        playsInline
-                        className="face-camera"
-                    />
-                ) : (
-                    <img
-                        src={capturedImage}
-                        alt="Captured face"
-                        className="face-preview"
-                    />
-                )}
-            </div>
-
-            <canvas
-                ref={canvasRef}
-                style={{ display: "none" }}
-            />
-
-            <div className="face-actions">
-                {!capturedImage ? (
-                    <button
-                        type="button"
-                        onClick={captureImage}
-                        disabled={!cameraReady || loading}
-                    >
-                        Capture Face
-                    </button>
-                ) : (
-                    <>
-                        <button
-                            type="button"
-                            onClick={retakeImage}
-                            disabled={loading}
-                        >
-                            Retake
-                        </button>
-
-                        <button
-                            type="button"
-                            onClick={verifyFace}
-                            disabled={loading}
-                        >
-                            {loading ? "Verifying..." : "Verify Face"}
-                        </button>
-                    </>
-                )}
-
-                {onCancel && (
-                    <button
-                        type="button"
-                        onClick={onCancel}
-                        disabled={loading}
-                    >
-                        Cancel
-                    </button>
-                )}
-            </div>
-
-            <p className="face-disclaimer">
-                Face matching does not currently include liveness detection.
-                A photograph or replayed image may pass verification.
-            </p>
-        </div>
+        stopCamera();
+      },
+      "image/jpeg",
+      0.9
     );
+  };
+
+  const retakePhoto = () => {
+    if (capturedImage?.url) {
+      URL.revokeObjectURL(capturedImage.url);
+    }
+
+    setCapturedImage(null);
+    startCamera();
+  };
+
+  const handleVerify = async () => {
+    if (!capturedImage?.blob || !token || !intentId) {
+      setError("Missing image or authentication information.");
+      return;
+    }
+
+    if (submittingRef.current) return;
+
+    submittingRef.current = true;
+    setVerifying(true);
+    setError("");
+
+    try {
+      const formData = new FormData();
+
+      formData.append(
+        "file",
+        capturedImage.blob,
+        "face-verification.jpg"
+      );
+
+      const response = await fetch(
+        `http://localhost:5000/api/v1/payment-intents/${encodeURIComponent(
+          intentId
+        )}/verify-face`,
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${token}`,
+          },
+          body: formData,
+        }
+      );
+
+      const result = await response.json();
+
+      if (!response.ok || !result.success) {
+        throw new Error(
+          result.message || "Face verification failed."
+        );
+      }
+
+      if (result.biometric?.verified !== true) {
+        throw new Error("Face verification was unsuccessful.");
+      }
+
+      stopCamera();
+
+      onVerified?.(result);
+    } catch (err) {
+      console.error("Face verification error:", err);
+      setError(err.message || "Unable to verify face.");
+    } finally {
+      setVerifying(false);
+      submittingRef.current = false;
+    }
+  };
+
+  useEffect(() => {
+    return () => {
+      if (streamRef.current) {
+        streamRef.current.getTracks().forEach((track) => track.stop());
+        streamRef.current = null;
+      }
+
+      if (capturedImage?.url) {
+        URL.revokeObjectURL(capturedImage.url);
+      }
+    };
+  }, [capturedImage]);
+
+  return (
+    <div className="face-verification-component">
+      <div className="face-verification-heading">
+        <h3>Face Verification</h3>
+        <p>Look directly at the camera to verify your identity.</p>
+      </div>
+
+      {error && (
+        <div className="send-money-message error-message">
+          {error}
+        </div>
+      )}
+
+      <div className="camera-container">
+        {capturedImage ? (
+          <img
+            src={capturedImage.url}
+            alt="Captured face"
+            className="captured-face-image"
+          />
+        ) : (
+          <video
+            ref={videoRef}
+            className="face-camera"
+            autoPlay
+            muted
+            playsInline
+          />
+        )}
+
+        {!cameraReady && !capturedImage && !cameraLoading && (
+          <p className="camera-placeholder">
+            Camera preview will appear here.
+          </p>
+        )}
+
+        {cameraLoading && (
+          <p className="camera-placeholder">
+            Starting camera...
+          </p>
+        )}
+      </div>
+
+      {!capturedImage ? (
+        <div className="face-button-group">
+          <button
+            type="button"
+            className="face-action-button"
+            onClick={startCamera}
+            disabled={cameraLoading || verifying}
+          >
+            {cameraLoading ? "Starting Camera..." : "Start Camera"}
+          </button>
+
+          <button
+            type="button"
+            className="face-secondary-button"
+            onClick={capturePhoto}
+            disabled={!cameraReady || verifying}
+          >
+            Capture Photo
+          </button>
+        </div>
+      ) : (
+        <div className="face-button-group">
+          <button
+            type="button"
+            className="face-secondary-button"
+            onClick={retakePhoto}
+            disabled={verifying}
+          >
+            Retake Photo
+          </button>
+
+          <button
+            type="button"
+            className="face-action-button"
+            onClick={handleVerify}
+            disabled={verifying}
+          >
+            {verifying ? "Verifying..." : "Verify My Face"}
+          </button>
+        </div>
+      )}
+
+      <p className="face-disclaimer">
+        Face verification is required to authorize this simulated
+        payment. This implementation does not include liveness
+        detection, so a photograph or replay attack may bypass it.
+      </p>
+
+      {onCancel && (
+        <button
+          type="button"
+          className="face-secondary-button"
+          onClick={() => {
+            stopCamera();
+            onCancel();
+          }}
+          disabled={verifying}
+        >
+          Cancel
+        </button>
+      )}
+    </div>
+  );
 };
 
 export default FaceVerification;
