@@ -1,3 +1,4 @@
+
 import { useCallback, useEffect, useState } from "react";
 import { useNavigate } from "react-router-dom";
 
@@ -64,10 +65,20 @@ const Dashboard = () => {
       maximumFractionDigits: 2,
     }).format(Number(amount || 0));
 
+  // Identify incoming and outgoing transactions
   const isCredit = (transaction) => {
     const type = String(
       transaction.type || transaction.transactionType || ""
     ).toUpperCase();
+
+    const description = String(
+      transaction.description || ""
+    ).toLowerCase();
+
+    // Welcome bonus is an incoming credit
+    if (description.includes("welcome bonus")) {
+      return true;
+    }
 
     return ["CREDIT", "RECEIVED", "DEPOSIT", "TOPUP"].includes(type);
   };
@@ -219,6 +230,7 @@ const Dashboard = () => {
                       <div className="transaction-icon">
                         {credit ? "↓" : "↑"}
                       </div>
+
                       <div>
                         <h4>
                           {transaction.description || "Wallet transaction"}
