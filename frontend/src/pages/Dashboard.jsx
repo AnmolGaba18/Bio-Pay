@@ -242,9 +242,8 @@ const Dashboard = () => {
                     </div>
 
                     <div
-                      className={`transaction-amount ${
-                        credit ? "amount-positive" : "amount-negative"
-                      }`}
+                      className={`transaction-amount ${credit ? "amount-positive" : "amount-negative"
+                        }`}
                     >
                       {credit ? "+" : "-"}
                       {formatAmount(transaction.amount)}
