@@ -1,8 +1,11 @@
-fastapi
-uvicorn[standard]
-python-multipart
-numpy
-Pillow
-torch
-torchvision
-facenet-pytorch
+fastapi==0.115.12
+uvicorn[standard]==0.34.0
+python-multipart==0.0.20
+numpy==1.26.4
+Pillow==10.4.0
+
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.2.2+cpu
+torchvision==0.17.2+cpu
+
+facenet-pytorch==2.6.0
